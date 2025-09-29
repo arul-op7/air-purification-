@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Air Purifier Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels"></script>
+<style>
+  :root {
+    --bg:#0f1724; --card:#0b1220; --muted:#94a3b8;
+    --accent:#06b6d4; --accent-2:#7c3aed; --ok:#16a34a; 
+    --warn:#f59e0b; --danger:#ef4444;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+  }
+  body {margin:0;background:#07101a;color:#e6eef8;}
+  .wrap {max-width:1400px;margin:20px auto;padding:18px;}
+  header {display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+  header h1 {font-size:20px;margin:0}
+  .small {font-size:12px;color:var(--muted)}
+  .grid {display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+  .card {background:var(--card);border-radius:10px;padding:12px}
+  .left {grid-column: span 8;}
+  .right {grid-column: span 4;}
+  .metric-grid {display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .metric {background:rgba(255,255,255,0.05);padding:12px;border-radius:8px;text-align:center}
+  .metric h3 {margin:0;font-size:14px;color:var(--muted)}
+  .metric p {margin:8px 0 0;font-size:20px;font-weight:600}
+  .control {display:flex;flex-direction:column;gap:10px}
+  .slider {width:100%}
+  .btn {background:linear-gradient(90deg,var(--accent),var(--accent-2));padding:8px 12px;border-radius:8px;border:0;color:#021024;font-weight:700;cursor:pointer}
+  .btn-ghost {background:transparent;border:1px solid rgba(255,255,255,0.2);padding:8px 10px;border-radius:8px;color:#fff;cursor:pointer}
+  .log {height:150px;overflow:auto;background:transparent;padding:8px;border-radius:6px;border:1px dashed rgba(255,255,255,0.1);font-size:13px;color:var(--muted)}
+  canvas {background:rgba(255,255,255,0.02);border-radius:8px;padding:5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Air Purifier — Monitoring & Control</h1>
+      <div class="small">Device: Unit-001 • Status: <span id="deviceState">Connecting...</span></div>
+    </div>
+    <div class="small">Last sync: <span id="lastSync">—</span></div>
+  </header>
+
+  <div class="grid">
+    <!-- Left Panel -->
+    <div class="left card">
+      <strong>Air Quality Metrics</strong>
+      <div class="metric-grid" style="margin-top:10px">
+        <div class="metric"><h3>PM2.5</h3><p id="pm25">—</p></div>
+        <div class="metric"><h3>PM10</h3><p id="pm10">—</p></div>
+        <div class="metric"><h3>VOC</h3><p id="voc">—</p></div>
+        <div class="metric"><h3>CO</h3><p id="co">—</p></div>
+        <div class="metric"><h3>NOx</h3><p id="nox">—</p></div>
+        <div class="metric"><h3>SOx</h3><p id="sox">—</p></div>
+        <div class="metric"><h3>Temp</h3><p id="temp">—</p></div>
+        <div class="metric"><h3>Humidity</h3><p id="humidity">—</p></div>
+        <div class="metric"><h3>AQI</h3><p id="aqi">—</p></div>
+      </div>
+      <canvas id="airChart" height="150"></canvas>
+      <canvas id="aqiGauge" height="180"></canvas>
+    </div>
+
+    <!-- Right Panel -->
+    <div class="right card">
+      <strong>Controls & Status</strong>
+      <div class="control" style="margin-top:10px">
+        <div>Fan Speed: <span id="fanSpeedLabel">—</span></div>
+        <input type="range" class="slider" id="fanSlider" min="0" max="100" step="5">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" id="btnOn">Turn On</button>
+          <button class="btn-ghost" id="btnOff">Turn Off</button>
+          <button class="btn-ghost" id="btnClean">Auto-Clean</button>
+          <button class="btn-ghost" id="btnAuto">Toggle Auto Mode</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn-ghost" onclick="setMode('eco')">Eco</button>
+          <button class="btn-ghost" onclick="setMode('turbo')">Turbo</button>
+          <button class="btn-ghost" onclick="setMode('sleep')">Sleep</button>
+          <button class="btn-ghost" onclick="setMode('auto')">Auto</button>
+        </div>
+        <div class="metric-grid" style="margin-top:10px">
+          <div class="metric"><h3>Battery</h3><p id="battery">—</p></div>
+          <div class="metric"><h3>Solar</h3><p id="solar">—</p></div>
+          <div class="metric"><h3>Filter Health</h3><p id="filterHealth">—</p></div>
+        </div>
+        <canvas id="powerChart" height="100"></canvas>
+        <div class="log" id="logBox"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------------------------
+   CONFIG
+---------------------------- */
+const ESP32_IP = "192.168.4.1";   // Replace with ESP32 IP
+const STATUS_URL = `http://${ESP32_IP}/status`;
+const CONTROL_URL = `http://${ESP32_IP}/control`;
+
+let state = {};
+
+/* ---------------------------
+   Charts Setup
+---------------------------- */
+const airCtx = document.getElementById("airChart");
+const powerCtx = document.getElementById("powerChart");
+const aqiCtx = document.getElementById("aqiGauge");
+
+// Air pollution trend
+let airChart = new Chart(airCtx, {
+  type: "line",
+  data: { labels: [], datasets: [
+    {label:"PM2.5", borderColor:"#06b6d4", data:[], fill:false},
+    {label:"PM10", borderColor:"#f59e0b", data:[], fill:false},
+    {label:"VOC", borderColor:"#ef4444", data:[], fill:false}
+  ]},
+  options: { responsive:true, scales:{x:{display:false}} }
+});
+
+// Power usage trend
+let powerChart = new Chart(powerCtx, {
+  type: "line",
+  data: { labels: [], datasets: [
+    {label:"Battery %", borderColor:"#16a34a", data:[], fill:false},
+    {label:"Solar W", borderColor:"#7c3aed", data:[], fill:false}
+  ]},
+  options: { responsive:true, scales:{x:{display:false}} }
+});
+
+// AQI Gauge
+let aqiGauge = new Chart(aqiCtx, {
+  type: "doughnut",
+  data: {
+    labels: ["Good","Moderate","Poor"],
+    datasets:[{
+      data:[0,0,0],
+      backgroundColor:["#16a34a","#f59e0b","#ef4444"]
+    }]
+  },
+  options: {
+    responsive:true,
+    cutout:"70%",
+    plugins:{ legend:{display:false}, datalabels:{display:false} }
+  }
+});
+
+/* ---------------------------
+   Fetch Device Status
+---------------------------- */
+async function fetchDeviceStatus(){
+  try {
+    const res = await fetch(STATUS_URL);
+    const data = await res.json();
+    state = data;
+
+    // Update UI
+    ["pm25","pm10","voc","co","nox","sox","temp","humidity"].forEach(k=>{
+      document.getElementById(k).innerText = data[k];
+    });
+
+    document.getElementById("fanSpeedLabel").innerText = data.fan + "%";
+    document.getElementById("fanSlider").value = data.fan;
+    document.getElementById("battery").innerText = data.battery + "%";
+    document.getElementById("solar").innerText   = data.solar + " W";
+    document.getElementById("filterHealth").innerText = data.filterHealth + "%";
+
+    document.getElementById("deviceState").innerText = "Online";
+    document.getElementById("lastSync").innerText = new Date().toLocaleTimeString();
+
+    // AQI calc simple
+    let aqiVal = Math.max(data.pm25, data.pm10);
+    document.getElementById("aqi").innerText = aqiVal;
+    if(aqiVal<=50){ aqiGauge.data.datasets[0].data=[1,0,0]; }
+    else if(aqiVal<=100){ aqiGauge.data.datasets[0].data=[0,1,0]; }
+    else{ aqiGauge.data.datasets[0].data=[0,0,1]; }
+    aqiGauge.update();
+
+    // Filter warning
+    if(data.filterHealth < 20){ log("⚠️ Replace filter soon!"); }
+
+    updateCharts(data);
+
+  } catch (err) {
+    console.error("Fetch error", err);
+    document.getElementById("deviceState").innerText = "Offline";
+  }
+}
+
+/* ---------------------------
+   Update Charts
+---------------------------- */
+function updateCharts(d){
+  let time = new Date().toLocaleTimeString();
+
+  // Air Chart
+  airChart.data.labels.push(time);
+  airChart.data.datasets[0].data.push(d.pm25);
+  airChart.data.datasets[1].data.push(d.pm10);
+  airChart.data.datasets[2].data.push(d.voc);
+  if (airChart.data.labels.length>20) {
+    airChart.data.labels.shift();
+    airChart.data.datasets.forEach(ds=>ds.data.shift());
+  }
+  airChart.update();
+
+  // Power Chart
+  powerChart.data.labels.push(time);
+  powerChart.data.datasets[0].data.push(d.battery);
+  powerChart.data.datasets[1].data.push(d.solar);
+  if (powerChart.data.labels.length>20) {
+    powerChart.data.labels.shift();
+    powerChart.data.datasets.forEach(ds=>ds.data.shift());
+  }
+  powerChart.update();
+}
+
+/* ---------------------------
+   Send Control Command
+---------------------------- */
+async function sendControlCommand(cmd){
+  try {
+    const res = await fetch(CONTROL_URL, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(cmd)
+    });
+    const resp = await res.json();
+    log("Command: " + JSON.stringify(cmd));
+    return resp;
+  } catch(err){
+    console.error("Control error", err);
+    log("Error sending command");
+  }
+}
+
+/* ---------------------------
+   UI Events
+---------------------------- */
+document.getElementById("fanSlider").addEventListener("change", e=>{
+  sendControlCommand({type:"setFan", value:Number(e.target.value)});
+});
+document.getElementById("btnOn").addEventListener("click", ()=>sendControlCommand({type:"power", value:true}));
+document.getElementById("btnOff").addEventListener("click", ()=>sendControlCommand({type:"power", value:false}));
+document.getElementById("btnClean").addEventListener("click", ()=>sendControlCommand({type:"triggerClean"}));
+document.getElementById("btnAuto").addEventListener("click", ()=>sendControlCommand({type:"autoMode", value:true}));
+
+function setMode(mode){ sendControlCommand({type:"mode", value:mode}); }
+
+/* ---------------------------
+   Logger
+---------------------------- */
+function log(msg){
+  const now = new Date().toLocaleTimeString();
+  document.getElementById("logBox").innerHTML = `<div>[${now}] ${msg}</div>` + document.getElementById("logBox").innerHTML;
+}
+
+/* ---------------------------
+   Main Loop
+---------------------------- */
+setInterval(fetchDeviceStatus, 5000);  // every 5 sec
+fetchDeviceStatus();
+</script>
+</body>
+</html>
